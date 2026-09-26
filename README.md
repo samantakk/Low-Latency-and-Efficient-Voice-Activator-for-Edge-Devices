@@ -1,0 +1,1 @@
+# Low-Latency-and-Efficient-Voice-Activator-for-Edge-Devices
