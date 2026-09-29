@@ -1,0 +1,8 @@
+## TensorFlow Lite Micro (with ESP-NN kernels) from the ESP-IDF component registry.
+## Version range NOT verified offline: check the registry for the release matching the
+## TFLM revision the model was converted with, and pin it.
+dependencies:
+  idf:
+    version: ">=5.3.0"
+  espressif/esp-tflite-micro:
+    version: "^1.3.0"

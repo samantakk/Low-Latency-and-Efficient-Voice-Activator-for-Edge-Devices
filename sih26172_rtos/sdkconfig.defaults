@@ -1,0 +1,52 @@
+# ---------------------------------------------------------------------------
+# SIH26172 RTOS / audio / networking subsystem - ESP32-S3 defaults.
+# Applied when no sdkconfig exists yet (first build, or after `idf.py fullclean`
+# plus deleting sdkconfig). Project-specific options: `idf.py menuconfig` ->
+# "SIH26172 wake-word subsystem".
+# ---------------------------------------------------------------------------
+CONFIG_IDF_TARGET="esp32s3"
+
+# Flash / partitions: Wi-Fi + TLS + WebSocket do not fit the default 1 MB app slot.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# ---- Power management (implementation.md "Power management") ----
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=3
+
+# ---- ulTaskGetIdleRunTimePercent() instrumentation ----
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
+CONFIG_FREERTOS_RUN_TIME_COUNTER_TYPE_U64=y
+
+# ---- Audio: I2S/GDMA interrupt keeps running during flash operations ----
+# On the S3 the RX interrupt is the GDMA interrupt, so both options are needed.
+CONFIG_I2S_ISR_IRAM_SAFE=y
+CONFIG_GDMA_ISR_IRAM_SAFE=y
+
+# ---- Keep all networking on core 1 (core 0 = deterministic 10 ms audio/DSP) ----
+CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_1=y
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU1=y
+
+# ---- RAM: trade Wi-Fi speed (we only need 32 KB/s) for ~27 KB more internal heap ----
+# IRAM-resident Wi-Fi code comes out of the same internal SRAM as the heap.
+# CONFIG_ESP_WIFI_IRAM_OPT is not set
+# CONFIG_ESP_WIFI_RX_IRAM_OPT is not set
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+
+# ---- TLS: ESP32-S3 crypto accelerators for mbedTLS ----
+CONFIG_MBEDTLS_HARDWARE_AES=y
+CONFIG_MBEDTLS_HARDWARE_SHA=y
+CONFIG_MBEDTLS_HARDWARE_MPI=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+# Allocate TLS record buffers only as large as needed (lower peak heap during wss://).
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+
+# ---- lwIP ----
+# Larger TCP send buffer absorbs short Wi-Fi stalls while streaming (heap, only when queued).
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=11520
+# Skip the ~1 s ARP probe on the DHCP-offered address (faster connect after a trigger).
+# CONFIG_LWIP_DHCP_DOES_ARP_CHECK is not set

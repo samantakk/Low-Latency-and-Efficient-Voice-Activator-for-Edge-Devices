@@ -1,0 +1,7 @@
+# Laptop-side test tools (asr_server.py, fake_device.py). Python 3.9+.
+#   pip install -r requirements.txt
+websockets>=13
+
+# Optional: offline speech recognition for asr_server.py --vosk-model PATH
+# (models: https://alphacephei.com/vosk/models, e.g. vosk-model-small-en-us-0.15)
+# vosk>=0.3.45

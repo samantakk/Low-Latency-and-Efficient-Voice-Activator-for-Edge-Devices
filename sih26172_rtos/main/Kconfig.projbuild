@@ -1,0 +1,257 @@
+menu "SIH26172 wake-word subsystem"
+
+    menu "Microphone (I2S)"
+
+        config SIH_I2S_BCLK_GPIO
+            int "I2S BCLK (SCK) GPIO"
+            range 0 48
+            default 4
+
+        config SIH_I2S_WS_GPIO
+            int "I2S WS (LRCL / word select) GPIO"
+            range 0 48
+            default 5
+
+        config SIH_I2S_DIN_GPIO
+            int "I2S data-in (DOUT of the microphone) GPIO"
+            range 0 48
+            default 6
+
+        config SIH_MIC_SAMPLE_BITS
+            int "Valid sample bits inside the 32-bit I2S word"
+            range 16 32
+            default 18
+            help
+                Number of meaningful, MSB-aligned bits the microphone puts in each 32-bit
+                I2S word. SPH0645LM4H = 18, INMP441 / ICS-43434 = 24. The conversion to
+                Q15.16 is derived from this value (see audio_format.h).
+
+        choice SIH_MIC_SLOT
+            prompt "Microphone channel (slot)"
+            default SIH_MIC_SLOT_LEFT
+            help
+                Which I2S slot the microphone drives. Most breakout boards drive the LEFT
+                slot when their SEL / L/R pin is tied to GND.
+
+            config SIH_MIC_SLOT_LEFT
+                bool "Left (SEL/LR pin to GND)"
+            config SIH_MIC_SLOT_RIGHT
+                bool "Right (SEL/LR pin to VDD)"
+        endchoice
+
+        config SIH_I2S_DMA_DESC_NUM
+            int "Number of DMA buffers (each is exactly one 10 ms hop)"
+            range 3 16
+            default 6
+            help
+                Each DMA buffer holds exactly 160 samples (10 ms at 16 kHz), so every
+                DMA-complete interrupt is one hop tick. More buffers = more tolerance
+                for audio_ingest_task being delayed (6 buffers = 60 ms of slack).
+
+    endmenu
+
+    menu "Audio buffers"
+
+        config SIH_RING_CAPACITY_LOG2
+            int "Ring buffer capacity, log2(samples)"
+            range 11 15
+            default 13
+            help
+                Capacity of the Q15.16 ring buffer in samples, as a power of two.
+                13 -> 8192 samples = 512 ms = 32 KB. Must hold one 25 ms DSP window, the
+                pre-roll, and the worst-case time network_task can be blocked in a
+                WebSocket send (all checked at compile time in app_config.h).
+
+        config SIH_PREROLL_MS
+            int "Pre-roll sent before the trigger point (ms)"
+            range 0 1500
+            default 300
+            help
+                Audio from before WAKE_CONFIRMED that is frozen out of the ring buffer
+                and sent first.
+
+        config SIH_STREAM_BACKLOG_MS
+            int "Streaming backlog buffer (ms of 16-bit PCM)"
+            range 500 5000
+            default 1500
+            help
+                network_task copies audio out of the ring buffer into this 16-bit
+                staging FIFO from the moment of the trigger, so no audio is lost while
+                Wi-Fi / TLS / WebSocket are still coming up. It must cover pre-roll +
+                connection time. 1500 ms = 48 KB (32 bytes per ms). If it overflows, the
+                OLDEST audio is dropped (and counted in the session log). With the
+                "power-off" Wi-Fi policy, connections take longer: raise it to 3000+
+                if the session log shows dropped samples and RAM allows.
+
+    endmenu
+
+    menu "Wi-Fi"
+
+        config SIH_WIFI_SSID
+            string "Wi-Fi SSID"
+            default "your-ssid"
+
+        config SIH_WIFI_PASSWORD
+            string "Wi-Fi password (empty for an open network)"
+            default "your-password"
+
+        choice SIH_WIFI_IDLE_POLICY
+            prompt "Wi-Fi state between detections (open question #1)"
+            default SIH_WIFI_IDLE_ASSOCIATED_PS
+            help
+                See implementation.md "Open questions" and the DESIGN CHOICE comment in
+                wifi_link.c.
+
+            config SIH_WIFI_IDLE_ASSOCIATED_PS
+                bool "Stay associated in max modem-sleep (lower trigger latency)"
+            config SIH_WIFI_IDLE_POWER_OFF
+                bool "Full radio power-down (esp_wifi_stop) between detections"
+        endchoice
+
+        config SIH_WIFI_LISTEN_INTERVAL
+            int "Listen interval in beacons while idle (associated mode)"
+            depends on SIH_WIFI_IDLE_ASSOCIATED_PS
+            range 1 10
+            default 3
+            help
+                How many AP beacon intervals the radio may sleep through while idle in
+                max modem-sleep. Higher = less power, slower reaction to downlink traffic.
+
+        config SIH_WIFI_CONNECT_TIMEOUT_MS
+            int "Max time to wait for Wi-Fi + IP after a trigger (ms)"
+            range 1000 30000
+            default 8000
+
+    endmenu
+
+    menu "Streaming server (WebSocket)"
+
+        config SIH_WS_URI
+            string "WebSocket URI (ws:// or wss://)"
+            default "ws://192.168.1.100:8765/stream"
+            help
+                ws:// for the local laptop test server (tools/asr_server.py), wss:// for
+                a TLS server. Audio is sent as binary frames of raw PCM s16le, 16 kHz, mono.
+
+        choice SIH_WS_TLS_VERIFY
+            prompt "Server certificate check for wss://"
+            default SIH_WS_TLS_CRT_BUNDLE
+            help
+                Only used when the URI starts with wss://.
+
+            config SIH_WS_TLS_CRT_BUNDLE
+                bool "ESP-IDF CA bundle (public servers with a real certificate)"
+                select MBEDTLS_CERTIFICATE_BUNDLE
+            config SIH_WS_TLS_EMBEDDED_CERT
+                bool "Pinned certificate main/certs/server_cert.pem (self-signed laptop server)"
+                help
+                    Embeds main/certs/server_cert.pem (create it with tools/make_cert.sh).
+                    The certificate itself is verified; the host name check is skipped
+                    because the laptop is usually addressed by IP.
+        endchoice
+
+        config SIH_WS_CONNECT_TIMEOUT_MS
+            int "Max time for TCP + TLS + WebSocket upgrade (ms)"
+            range 1000 30000
+            default 6000
+
+        config SIH_WS_SEND_TIMEOUT_MS
+            int "Max time a single WebSocket send may block (ms)"
+            range 20 2000
+            default 100
+            help
+                network_task cannot drain the ring buffer while it is blocked in a send.
+                esp_websocket_client applies this timeout up to 4 times per frame, so
+                4 x this value must be shorter than the ring buffer history (checked at
+                compile time). A send only blocks once ~11 KB (~360 ms of audio) is
+                already queued in the TCP send buffer. A send that times out ends the
+                session.
+
+        config SIH_WS_MIN_FRAME_MS
+            int "Minimum audio per WebSocket frame while live (ms)"
+            range 10 100
+            default 20
+            help
+                Live audio is batched into frames of at least this many ms to reduce
+                per-frame overhead. Pre-roll / backlog is sent immediately.
+
+        config SIH_WS_MAX_FRAME_MS
+            int "Maximum audio per WebSocket frame (ms)"
+            range 10 200
+            default 100
+
+    endmenu
+
+    menu "End of speech and cooldown (open questions #2 and #4)"
+
+        config SIH_EOS_MAX_STREAM_MS
+            int "Hard cap on audio streamed after the trigger (ms)"
+            range 1000 60000
+            default 8000
+
+        config SIH_EOS_TRAILING_SILENCE_MS
+            int "Trailing silence that ends the utterance (ms)"
+            range 200 5000
+            default 800
+
+        config SIH_EOS_NO_SPEECH_TIMEOUT_MS
+            int "End the session if no speech is heard after the trigger within (ms)"
+            range 500 20000
+            default 3000
+
+        config SIH_EOS_SPEECH_MARGIN_DB
+            int "Speech must be this many dB above the tracked noise floor"
+            range 3 30
+            default 12
+
+        config SIH_EOS_MIN_SPEECH_DBFS
+            int "Absolute minimum level counted as speech (dBFS, negative)"
+            range -90 -10
+            default -55
+
+        config SIH_EOS_HONOR_SERVER_SIGNAL
+            bool "End the stream when the server sends {\"type\":\"end_of_speech\"}"
+            default y
+
+        config SIH_COOLDOWN_MS
+            int "Cooldown after the radio is down, before DSP/NN resume (ms)"
+            range 0 10000
+            default 1500
+
+    endmenu
+
+    menu "NN integration / manual trigger"
+
+        config SIH_TRIGGER_BUTTON_ENABLE
+            bool "Also fire WAKE_CONFIRMED on a button press (manual trigger)"
+            default y
+
+        config SIH_TRIGGER_BUTTON_GPIO
+            int "Button GPIO (active low, internal pull-up)"
+            depends on SIH_TRIGGER_BUTTON_ENABLE
+            range 0 48
+            default 0
+            help
+                GPIO0 is the BOOT button on ESP32-S3 DevKitC boards.
+
+        config SIH_RAM_BUDGET_BYTES
+            int "RAM budget to report against (bytes)"
+            default 262144
+
+    endmenu
+
+    menu "Diagnostics"
+
+        config SIH_STATS_ENABLE
+            bool "Print CPU idle %, timing and memory statistics"
+            default y
+
+        config SIH_STATS_PERIOD_HOPS
+            int "Statistics period in hops (100 hops = 1 s)"
+            depends on SIH_STATS_ENABLE
+            range 100 60000
+            default 500
+
+    endmenu
+
+endmenu
